@@ -1,0 +1,5 @@
+*.zip
+.releases/
+.idea/
+.vscode/
+.DS_Store

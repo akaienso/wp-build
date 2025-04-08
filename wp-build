@@ -1,0 +1,142 @@
+#!/bin/bash
+
+MODE="plugin"
+PLUGIN_FILE=""
+THEME_FILE="style.css"
+CUSTOM_PATH=""
+RELEASE_TYPE="test"
+TAG_NAME_OVERRIDE=""
+DRY_RUN=0
+
+# ─── Show Help ──────────────────────────────────────────────────────────────
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+  echo ""
+  echo "🛠  wp-build — WordPress Plugin/Theme Packager"
+  echo ""
+  echo "Usage:"
+  echo "  wp-build                  Auto-detect plugin, export ZIP to ../releases/test/{version}/"
+  echo "  wp-build --theme          Auto-detect theme (style.css), export ZIP"
+  echo ""
+  echo "Flags:"
+  echo "  --test                   Default: ../releases/test/{version}/"
+  echo "  --alpha                  Alpha prerelease"
+  echo "  --beta                   Beta prerelease"
+  echo "  --rc                     Release candidate"
+  echo "  --final                  Final production release (no tag)"
+  echo "  --tag-name=<tag>         Override auto-tag generation"
+  echo "  --dry-run                Simulate actions without changes"
+  echo "  --help, -h               Show this help message"
+  echo ""
+  exit 0
+fi
+
+# ─── Handle Flags ───────────────────────────────────────────────────────────
+for arg in "$@"; do
+  case $arg in
+    --t|--theme)
+      MODE="theme";;
+    --rc)
+      RELEASE_TYPE="rc";;
+    --final)
+      RELEASE_TYPE="final";;
+    --beta)
+      RELEASE_TYPE="beta";;
+    --alpha)
+      RELEASE_TYPE="alpha";;
+    --test)
+      RELEASE_TYPE="test";;
+    --dry-run)
+      DRY_RUN=1;;
+  esac
+  if [[ "$arg" == --tag-name=* ]]; then
+    TAG_NAME_OVERRIDE="${arg#*=}"
+  fi
+done
+
+# ─── Detect Plugin or Prompt ────────────────────────────────────────────────
+if [[ "$MODE" == "plugin" ]]; then
+  CURRENT_DIR_NAME=$(basename "$PWD")
+  CANDIDATE_FILE="./${CURRENT_DIR_NAME}.php"
+
+  if [[ -f "$CANDIDATE_FILE" ]]; then
+    PLUGIN_FILE="$CANDIDATE_FILE"
+  else
+    PLUGIN_FILE=$(find . -type f -name "*.php" -exec grep -l "Plugin Name:" {} + | head -n 1)
+  fi
+
+  if [[ -z "$PLUGIN_FILE" ]]; then
+    echo "⚠️  No plugin header detected in this folder."
+    read -p "📂 Enter the full path to a plugin file or [q]uit: " CUSTOM_PATH
+    [[ "$CUSTOM_PATH" == "q" ]] && echo "👋 Cancelled." && exit 1
+    [[ ! -f "$CUSTOM_PATH" ]] && echo "❌ File not found: $CUSTOM_PATH" && exit 1
+    PLUGIN_FILE="$CUSTOM_PATH"
+  fi
+
+  VERSION=$(grep -Ei "^[[:space:]]*\*?[[:space:]]*Version:[[:space:]]*" "$PLUGIN_FILE" | head -n 1 | sed -E 's/^[[:space:]]*\*?[[:space:]]*Version:[[:space:]]*//' | tr -d '\r')
+  SLUG=$(basename "$PLUGIN_FILE" .php)
+
+else
+  if [[ -f "$THEME_FILE" ]] && grep -q "Theme Name:" "$THEME_FILE"; then
+    :
+  else
+    echo "⚠️  style.css not found or missing Theme Name header."
+    read -p "📂 Enter the full path to the theme's style.css or [q]uit: " CUSTOM_PATH
+    [[ "$CUSTOM_PATH" == "q" ]] && echo "👋 Cancelled." && exit 1
+    [[ ! -f "$CUSTOM_PATH" ]] && echo "❌ File not found: $CUSTOM_PATH" && exit 1
+    THEME_FILE="$CUSTOM_PATH"
+  fi
+  VERSION=$(grep -i "^Version:" "$THEME_FILE" | awk -F': ' '{ print $2 }' | tr -d '\r')
+  SLUG=$(grep -i "^Theme Name:" "$THEME_FILE" | awk -F': ' '{ print $2 }' | tr -d '\r' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+fi
+
+[[ -z "$VERSION" ]] && echo "❌ Version not found in file. Aborting." && exit 1
+
+# ─── Tagging Logic ──────────────────────────────────────────────────────────
+if [[ "$RELEASE_TYPE" =~ ^(alpha|beta|rc|test)$ ]]; then
+  if [[ -n "$TAG_NAME_OVERRIDE" ]]; then
+    TAG_NAME="$TAG_NAME_OVERRIDE"
+    VERSION="$TAG_NAME_OVERRIDE"
+  else
+    if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(alpha|beta|rc|test)\.([0-9]+)$ ]]; then
+      MAIN_VERSION="${BASH_REMATCH[1]}"
+      TYPE="${BASH_REMATCH[2]}"
+      existing_tags=$(git tag -l "v${MAIN_VERSION}-${TYPE}.*" | sed -E "s/^v${MAIN_VERSION}-${TYPE}\.//" | sort -n)
+      next=1
+      for tag_suffix in $existing_tags; do
+        if [[ "$tag_suffix" =~ ^[0-9]+$ ]] && [[ $tag_suffix -eq $next ]]; then
+          ((next++))
+        else
+          break
+        fi
+      done
+      VERSION="${MAIN_VERSION}-${TYPE}.${next}"
+    else
+      MAIN_VERSION=$(echo "$VERSION" | sed -E "s/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/")
+      VERSION="${MAIN_VERSION}-${RELEASE_TYPE}.1"
+    fi
+    TAG_NAME="v${VERSION}"
+  fi
+
+  if ! git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "🧪 Dry Run: Would tag $TAG_NAME"
+    else
+      git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+      echo "🏷️  Created Git tag: $TAG_NAME"
+    fi
+  else
+    echo "⚠️  Git tag $TAG_NAME already exists. Skipping."
+  fi
+fi
+
+# ─── Build Output ───────────────────────────────────────────────────────────
+DEST_DIR="../releases/$RELEASE_TYPE/$VERSION"
+ARCHIVE_NAME="${SLUG}.zip"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "🧪 Dry Run: Would build $ARCHIVE_NAME in $DEST_DIR"
+else
+  mkdir -p "$DEST_DIR"
+  git archive --format=zip HEAD -o "$DEST_DIR/$ARCHIVE_NAME"
+  echo "✅ Built $ARCHIVE_NAME in $DEST_DIR"
+fi
